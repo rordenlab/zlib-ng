@@ -311,8 +311,135 @@ static inline unsigned longest_match(deflate_state *const s, IPos cur_match) {
     return s->lookahead;
 }
 #endif
-
 #ifdef std3_longest_match
+#ifdef _MSC_VER
+
+/* MSC doesn't have __builtin_expect.  Just ignore likely/unlikely and
+   hope the compiler optimizes for the best.
+*/
+#define likely(x)       (x)
+#define unlikely(x)     (x)
+
+int __inline __builtin_ctzl(unsigned long mask)
+{
+    unsigned long index ;
+
+    return _BitScanForward(&index, mask) == 0 ? 32 : ((int)index) ;
+}
+#else
+#define likely(x)       __builtin_expect((x),1)
+#define unlikely(x)     __builtin_expect((x),0)
+#endif
+
+//static uint32_t longest_match(s, cur_match)
+//    deflate_state *s;
+//    IPos cur_match;                             /* current match */
+//    {
+static inline unsigned longest_match(deflate_state *const s, IPos cur_match) {
+
+    uint32_t chain_length = s->max_chain_length;      /* max hash chain length */
+    register uint8_t *scan = s->window + s->strstart; /* current string */
+    register uint8_t *match;                          /* matched string */
+    register int len;                                 /* length of current match */
+    int best_len = s->prev_length;                    /* best match length so far */
+    int nice_match = s->nice_match;                   /* stop if match long enough */
+    IPos limit = s->strstart > (IPos)MAX_DIST(s) ?
+        s->strstart - (IPos)MAX_DIST(s) : NIL;
+    /* Stop when cur_match becomes <= limit. To simplify the code,
+     * we prevent matches with the string of window index 0.
+     */
+    Pos *prev = s->prev;
+    uint32_t wmask = s->w_mask;
+
+    register uint8_t *strend = s->window + s->strstart + MAX_MATCH;
+    /* We optimize for a minimal match of four bytes */
+    register uint32_t scan_start = *(uint32_t*)scan;
+    register uint32_t scan_end   = *(uint32_t*)(scan+best_len-3);
+
+    /* The code is optimized for HASH_BITS >= 8 and MAX_MATCH-2 multiple of 16.
+     * It is easy to get rid of this optimization if necessary.
+     */
+    Assert(s->hash_bits >= 8 && MAX_MATCH == 258, "Code too clever");
+
+    /* Do not waste too much time if we already have a good match: */
+    if (s->prev_length >= s->good_match) {
+        chain_length >>= 2;
+    }
+    /* Do not look for matches beyond the end of the input. This is necessary
+     * to make deflate deterministic.
+     */
+    if ((uint32_t)nice_match > s->lookahead) nice_match = s->lookahead;
+
+    Assert((uint64_t)s->strstart <= s->window_size-MIN_LOOKAHEAD, "need lookahead");
+
+    do {
+        int cont ;
+        Assert(cur_match < s->strstart, "no future");
+
+        /* Skip to next match if the match length cannot increase
+         * or if the match length is less than 2.  Note that the checks below
+         * for insufficient lookahead only occur occasionally for performance
+         * reasons.  Therefore uninitialized memory will be accessed, and
+         * conditional jumps will be made that depend on those values.
+         * However the length of the match is limited to the lookahead, so
+         * the output of deflate is not affected by the uninitialized values.
+         */
+        cont = 1;
+        do {
+            match = s->window + cur_match;
+            if (likely(*(uint32_t*)(match+best_len-3) != scan_end) || (*(uint32_t*)match != scan_start)) {
+                if ((cur_match = prev[cur_match & wmask]) > limit
+                    && --chain_length != 0) {
+                    continue;
+                } else
+                    cont = 0;
+            }
+            break;
+        } while (1);
+
+        if (!cont)
+            break;
+
+        scan += 4, match+=4;
+        do {
+            uint64_t sv = *(uint64_t*)(void*)scan;
+            uint64_t mv = *(uint64_t*)(void*)match;
+            uint64_t xor = sv ^ mv;
+            if (xor) {
+                int match_byte = __builtin_ctzl(xor) / 8;
+                scan += match_byte;
+                match += match_byte;
+                break;
+            } else {
+                scan += 8;
+                match += 8;
+            }
+        } while (scan < strend);
+
+        if (scan > strend)
+            scan = strend;
+
+        Assert(scan <= s->window+(uint32_t)(s->window_size-1), "wild scan");
+
+        len = MAX_MATCH - (int)(strend - scan);
+        scan = strend - MAX_MATCH;
+
+        if (len > best_len) {
+            s->match_start = cur_match;
+            best_len = len;
+            if (len >= nice_match) break;
+            scan_end = *(uint32_t*)(scan+best_len-3);
+        }
+    } while ((cur_match = prev[cur_match & wmask]) > limit
+             && --chain_length != 0);
+
+    if ((uint32_t)best_len <= s->lookahead) return (uint32_t)best_len;
+    return s->lookahead;
+}
+
+
+#endif
+#ifdef std33_longest_match
 /* longest_match() with minor change to improve performance (in terms of
  * execution time).
  *
